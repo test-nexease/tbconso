@@ -79,7 +79,7 @@ if uploaded_files and tp_category_file and st.button("Process and Download Final
     # Map entity-specific GL column names
     entity_gl_column_map = {
         8223: 'Acc',
-        8226: 'AccountNo',
+        8226: 'Account Code',
         8297: 'Account Code',
         8224: 'G/L Account',
         8225: 'G/L Account',
