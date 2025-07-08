@@ -1,0 +1,213 @@
+import streamlit as st
+import pandas as pd
+from io import BytesIO
+
+st.set_page_config(page_title="TB Processor", layout="wide")
+st.title("Trial Balance Entity Processor")
+
+# Step 1: Upload Files
+uploaded_files = st.file_uploader(
+    "Upload multiple Excel files",
+    type=["xlsx"],
+    accept_multiple_files=True
+)
+
+months = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+]
+years = ['25', '26', '27', '28', '29', '30']
+
+selected_month = st.selectbox("Select Month", months)
+selected_year = st.selectbox("Select Year", years)
+selected_month_year = f"{selected_month}-{selected_year}"
+
+# Helper to deduplicate columns if needed
+def deduplicate_columns(columns):
+    seen = {}
+    new_columns = []
+    for col in columns:
+        if col not in seen:
+            seen[col] = 0
+            new_columns.append(col)
+        else:
+            seen[col] += 1
+            new_columns.append(f"{col}.{seen[col]}")
+    return new_columns
+
+if uploaded_files and st.button("Process and Download Final Excel"):
+
+    entity_dfs = {}
+
+    # Load and merge files by Entity
+    for file in uploaded_files:
+        df = pd.read_excel(file)
+        df.columns = df.columns.str.strip()
+        df.columns = deduplicate_columns(df.columns)
+
+        # Find Entity column (case insensitive)
+        entity_col = [col for col in df.columns if col.lower() == 'entity']
+        if not entity_col:
+            st.error(f"'Entity' column not found in file {file.name}")
+            continue
+
+        entity_col = entity_col[0]
+        df = df.dropna(subset=[entity_col])
+
+        try:
+            df[entity_col] = df[entity_col].astype(int)
+        except ValueError:
+            df[entity_col] = df[entity_col].astype(str)
+
+        df = df.sort_values(by=entity_col)
+
+        for entity_code in df[entity_col].unique():
+            entity_df = df[df[entity_col] == entity_code]
+            if entity_code in entity_dfs:
+                entity_dfs[entity_code] = pd.concat([entity_dfs[entity_code], entity_df], ignore_index=True)
+            else:
+                entity_dfs[entity_code] = entity_df
+
+    # Clean column names across all dfs
+    for key in entity_dfs:
+        entity_dfs[key].columns = entity_dfs[key].columns.str.strip()
+
+    # ========================== POST-PROCESSING ==========================
+
+    def classify_bs_pl(col, x):
+        x = str(x)
+        if x.startswith('M'):
+            return 'Migration'
+        elif x.startswith(('1', 'L1', '2', 'L2')):
+            return 'BS'
+        elif x.startswith(('3', 'L3', '4', 'L4', '5', '6', '7', '8', '9')):
+            return 'PL'
+        return None
+
+    def add_monthly_movement(df, debit_col, credit_col):
+        # Ensure columns exist to avoid errors
+        if debit_col in df.columns and credit_col in df.columns:
+            df['Monthly Movement'] = df[debit_col].fillna(0) + df[credit_col].fillna(0)
+        else:
+            df['Monthly Movement'] = None
+        return df
+
+    processed_dfs = []
+
+    for entity, df in entity_dfs.items():
+        df['Month'] = selected_month_year
+
+        # Apply BS/PL classification dynamically
+        if 'G/L Account' in df.columns:
+            df['G/L Account'] = df['G/L Account'].astype(str).str.replace(r'^.*/', '', regex=True)
+            df['BS/PL'] = df['G/L Account'].apply(lambda x: classify_bs_pl('G/L Account', x))
+        elif 'Account Code' in df.columns:
+            df['BS/PL'] = df['Account Code'].apply(lambda x: classify_bs_pl('Account Code', x))
+        elif 'Acc' in df.columns:
+            df['BS/PL'] = df['Acc'].apply(lambda x: classify_bs_pl('Acc', x))
+        else:
+            df['BS/PL'] = None
+
+        # Add Monthly Movement dynamically
+        if ('Debit Balance in Company Code Currency' in df.columns and
+                'Credit Balance in Company Code Currency' in df.columns):
+            df = add_monthly_movement(df, 'Debit Balance in Company Code Currency', 'Credit Balance in Company Code Currency')
+        elif 'Debit' in df.columns and 'Credit' in df.columns:
+            df = add_monthly_movement(df, 'Debit', 'Credit')
+        elif 'ActualMTD' in df.columns:
+            df.rename(columns={'ActualMTD': 'Monthly Movement'}, inplace=True)
+        else:
+            df['Monthly Movement'] = None
+
+        df['Entity'] = entity
+        processed_dfs.append((entity, df))
+
+    # Write all entities to separate sheets in an Excel file
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        for entity, df in processed_dfs:
+            sheet_name = str(entity)[:31]  # Excel sheet name max length = 31
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    output.seek(0)
+
+    st.success("Processing complete!")
+
+    st.download_button(
+        label="Download Processed Final Excel File",
+        data=output,
+        file_name=f'TB_{selected_month_year}.xlsx',
+        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+
+else:
+    st.info("Please upload Excel files and select month/year to begin.")
+
+
+
+import streamlit as st
+import pandas as pd
+import io
+
+st.title("Auto Consolidate Excel Files by Common Sheet Names")
+
+uploaded_files = st.file_uploader(
+    "Upload multiple Excel files", accept_multiple_files=True, type=["xlsx", "xls"]
+)
+
+if uploaded_files:
+    # Step 1: Find common sheet names across all files
+    sheet_sets = []
+    for file in uploaded_files:
+        try:
+            xls = pd.ExcelFile(file)
+            sheet_sets.append(set(xls.sheet_names))
+        except Exception as e:
+            st.error(f"Error reading {file.name}: {e}")
+            st.stop()
+    common_sheets = set.intersection(*sheet_sets)
+    
+    if not common_sheets:
+        st.warning("No common sheet names found across all uploaded files.")
+    else:
+        st.write(f"### Common sheets found: {list(common_sheets)}")
+        
+        consolidated_sheets = {}
+        errors = []
+        
+        # Step 2: Consolidate each common sheet
+        for sheet in common_sheets:
+            dfs = []
+            for file in uploaded_files:
+                try:
+                    df = pd.read_excel(file, sheet_name=sheet)
+                    dfs.append(df)
+                except Exception as e:
+                    errors.append(f"{file.name} - {sheet}: {e}")
+            if dfs:
+                consolidated_sheets[sheet] = pd.concat(dfs, ignore_index=True)
+        
+        # Step 4: Provide download option for all consolidated sheets in one Excel
+        def to_excel(dfs_dict):
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                for sheet_name, df in dfs_dict.items():
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+            processed_data = output.getvalue()
+            return processed_data
+        
+        excel_data = to_excel(consolidated_sheets)
+        
+        st.download_button(
+            label="Download All Consolidated Sheets as Excel",
+            data=excel_data,
+            file_name="Consolidated_TB.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        
+        if errors:
+            st.error("Errors occurred while reading some sheets:")
+            for err in errors:
+                st.write(err)
+else:
+    st.info("Upload multiple Excel files to consolidate common sheets.")
