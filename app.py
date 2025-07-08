@@ -115,7 +115,10 @@ if uploaded_files and tp_category_file and st.button("Process and Download Final
         gl_col = entity_gl_column_map.get(int(entity), None)
 
         if gl_col and gl_col in df.columns:
+            # Clean and convert GL column to ensure consistency (remove any formatting, enforce numeric)
             df[gl_col] = df[gl_col].astype(str).str.strip().str.replace(r'^.*/', '', regex=True)
+            df[gl_col] = pd.to_numeric(df[gl_col], errors='coerce').fillna(df[gl_col]).astype(str).str.strip()
+
             df['BS/PL'] = df[gl_col].apply(lambda x: classify_bs_pl(gl_col, x))
 
             # ------------------- Merge TP Category ---------------------
