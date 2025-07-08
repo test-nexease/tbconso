@@ -5,12 +5,15 @@ from io import BytesIO
 st.set_page_config(page_title="TB Processor", layout="wide")
 st.title("Trial Balance Entity Processor")
 
-# Step 1: Upload Files
+# Step 1: Upload TB Files
 uploaded_files = st.file_uploader(
-    "Upload multiple Excel files",
+    "Upload multiple Trial Balance Excel files",
     type=["xlsx"],
     accept_multiple_files=True
 )
+
+# Upload TP Category File
+tp_category_file = st.file_uploader("Upload TP Category Excel file", type=["xlsx"])
 
 months = [
     'January', 'February', 'March', 'April', 'May', 'June',
@@ -22,7 +25,6 @@ selected_month = st.selectbox("Select Month", months)
 selected_year = st.selectbox("Select Year", years)
 selected_month_year = f"{selected_month}-{selected_year}"
 
-# Helper to deduplicate columns if needed
 def deduplicate_columns(columns):
     seen = {}
     new_columns = []
@@ -35,17 +37,23 @@ def deduplicate_columns(columns):
             new_columns.append(f"{col}.{seen[col]}")
     return new_columns
 
-if uploaded_files and st.button("Process and Download Final Excel"):
+# Start processing if both files uploaded
+if uploaded_files and tp_category_file and st.button("Process and Download Final Excel"):
+
+    # Load TP Category once
+    tp_df = pd.read_excel(tp_category_file)
+    tp_df.columns = tp_df.columns.str.strip()
+    if 'GL code' not in tp_df.columns:
+        st.error("The TP Category file must contain a column named 'GL code'.")
+        st.stop()
 
     entity_dfs = {}
 
-    # Load and merge files by Entity
     for file in uploaded_files:
         df = pd.read_excel(file)
         df.columns = df.columns.str.strip()
         df.columns = deduplicate_columns(df.columns)
 
-        # Find Entity column (case insensitive)
         entity_col = [col for col in df.columns if col.lower() == 'entity']
         if not entity_col:
             st.error(f"'Entity' column not found in file {file.name}")
@@ -68,11 +76,18 @@ if uploaded_files and st.button("Process and Download Final Excel"):
             else:
                 entity_dfs[entity_code] = entity_df
 
-    # Clean column names across all dfs
-    for key in entity_dfs:
-        entity_dfs[key].columns = entity_dfs[key].columns.str.strip()
-
-    # ========================== POST-PROCESSING ==========================
+    # Map entity-specific GL column names
+    entity_gl_column_map = {
+        8223: 'Acc',
+        8226: 'AccountNo',
+        8297: 'Account Code',
+        8224: 'G/L Account',
+        8225: 'G/L Account',
+        8229: 'G/L Account',
+        8235: 'G/L Account',
+        8236: 'Acc',
+        
+    }
 
     def classify_bs_pl(col, x):
         x = str(x)
@@ -85,7 +100,6 @@ if uploaded_files and st.button("Process and Download Final Excel"):
         return None
 
     def add_monthly_movement(df, debit_col, credit_col):
-        # Ensure columns exist to avoid errors
         if debit_col in df.columns and credit_col in df.columns:
             df['Monthly Movement'] = df[debit_col].fillna(0) + df[credit_col].fillna(0)
         else:
@@ -97,18 +111,23 @@ if uploaded_files and st.button("Process and Download Final Excel"):
     for entity, df in entity_dfs.items():
         df['Month'] = selected_month_year
 
-        # Apply BS/PL classification dynamically
-        if 'G/L Account' in df.columns:
-            df['G/L Account'] = df['G/L Account'].astype(str).str.replace(r'^.*/', '', regex=True)
-            df['BS/PL'] = df['G/L Account'].apply(lambda x: classify_bs_pl('G/L Account', x))
-        elif 'Account Code' in df.columns:
-            df['BS/PL'] = df['Account Code'].apply(lambda x: classify_bs_pl('Account Code', x))
-        elif 'Acc' in df.columns:
-            df['BS/PL'] = df['Acc'].apply(lambda x: classify_bs_pl('Acc', x))
+        # ------------------- Determine GL Column ---------------------
+        gl_col = entity_gl_column_map.get(int(entity), None)
+
+        if gl_col and gl_col in df.columns:
+            df[gl_col] = df[gl_col].astype(str).str.strip().str.replace(r'^.*/', '', regex=True)
+            df['BS/PL'] = df[gl_col].apply(lambda x: classify_bs_pl(gl_col, x))
+
+            # ------------------- Merge TP Category ---------------------
+            tp_df_copy = tp_df.copy()
+            tp_df_copy['GL code'] = tp_df_copy['GL code'].astype(str).str.strip()
+
+            df = df.merge(tp_df_copy, how='left', left_on=gl_col, right_on='GL code')
         else:
             df['BS/PL'] = None
+            st.warning(f"GL column for entity {entity} not found or missing in data.")
 
-        # Add Monthly Movement dynamically
+        # ------------------- Monthly Movement ---------------------
         if ('Debit Balance in Company Code Currency' in df.columns and
                 'Credit Balance in Company Code Currency' in df.columns):
             df = add_monthly_movement(df, 'Debit Balance in Company Code Currency', 'Credit Balance in Company Code Currency')
@@ -122,15 +141,14 @@ if uploaded_files and st.button("Process and Download Final Excel"):
         df['Entity'] = entity
         processed_dfs.append((entity, df))
 
-    # Write all entities to separate sheets in an Excel file
+    # Save to Excel
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         for entity, df in processed_dfs:
-            sheet_name = str(entity)[:31]  # Excel sheet name max length = 31
+            sheet_name = str(entity)[:31]
             df.to_excel(writer, sheet_name=sheet_name, index=False)
 
     output.seek(0)
-
     st.success("Processing complete!")
 
     st.download_button(
@@ -141,7 +159,7 @@ if uploaded_files and st.button("Process and Download Final Excel"):
     )
 
 else:
-    st.info("Please upload Excel files and select month/year to begin.")
+    st.info("Please upload TB Excel files, TP Category file, and select month/year to begin.")
 
 
 
