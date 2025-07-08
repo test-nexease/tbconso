@@ -120,7 +120,7 @@ if uploaded_files and tp_category_file and st.button("Process and Download Final
 
             # ------------------- Merge TP Category ---------------------
             tp_df_copy = tp_df.copy()
-            tp_df_copy['GL code'] = tp_df_copy['GL code'].astype(str).str.strip()
+            tp_df_copy['Entity Code'] = tp_df_copy['Entity Code'].astype(str).str.strip()
 
             df = df.merge(tp_df_copy, how='left', left_on=gl_col, right_on='GL code')
         else:
